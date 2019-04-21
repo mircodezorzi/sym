@@ -22,19 +22,26 @@
 /* define keys */
 #define __DVORAK__
 #if defined(__DVORAK__)
-	#define KEY_LEFT  'd'
-	#define KEY_DOWN  'h'
-	#define KEY_UP    't'
-	#define KEY_RIGHT 'n'
+	/* TODO: add binds for left and right movements */
+	#define KEY_DOWN      CTRLMASK('h')
+	#define KEY_UP        CTRLMASK('t')
+	#define KEY_JUMP_DOWN CTRLMASK('g')
+	#define KEY_JUMP_UP   CTRLMASK('c')
+	#define KEY_RIGHT     CTRLMASK('d')
+	#define KEY_LEFT      CTRLMASK('n')
+	#define KEY_QUIT      CTRLMASK('f')
 #else
-	#define KEY_LEFT  'h'
-	#define KEY_DOWN  'j'
-	#define KEY_UP    'k'
-	#define KEY_RIGHT 'l'
+	#define KEY_DOWN      CTRLMASK('j')
+	#define KEY_UP        CTRLMASK('k')
+	#define KEY_JUMP_DOWN CTRLMASK('u')
+	#define KEY_JUMP_UP   CTRLMASK('i')
+	#define KEY_RIGHT     CTRLMASK('h')
+	#define KEY_LEFT      CTRLMASK('l')
+	#define KEY_QUIT      CTRLMASK('c')
 #endif /* __DVORAK__ */
 
 /* configs */
-#define STRING_SIZE 128
+#define STRING_MAX_SIZE 128
 
 /* macros */
 #define CTRLMASK(k) ((k) & 0x1f)
@@ -49,7 +56,7 @@ unsigned int term_w;
 /* structs */
 struct Process {
 
-	char name[STRING_SIZE];
+	char name[STRING_MAX_SIZE];
 	int pid;
 	int priority;
 
@@ -57,7 +64,8 @@ struct Process {
 	struct Process* next;
 
 	struct Stage {
-		char* name[STRING_SIZE];
+		char name[STRING_MAX_SIZE];
+		int namelen;
 		enum { Io, Computing } type;
 		int t_length;
 	} *stages;
@@ -65,7 +73,8 @@ struct Process {
 	int cstage; /* current stage */
 
 	struct Segment {
-		char* name[STRING_SIZE];
+		char name[STRING_MAX_SIZE];
+		int namelen;
 		int t_load;
 		int t_unload;
 		int address;
@@ -94,6 +103,7 @@ struct Entry {
 	enum { String, Integer, Boolean,
 	       ProcessStage, ProcessSegment } t;
 	int* c;
+	int s; /* subentry selected for ProcessStage and ProcessSegment entries */
 };
 
 struct Dialog {
@@ -128,6 +138,7 @@ void initwin();
 void mvprintf(int x, int y, char* format, ...);
 void mvprintw(int x, int y, char* str, int len, int w);
 void resize_handler(int sig);
+void unmask_ctrl(char* str, int key);
 
 /* functions */
 void draw_border(int x, int y, int w, int h){
@@ -150,6 +161,7 @@ void draw_border(int x, int y, int w, int h){
 }
 
 void draw_hline(int x, int y, int len){
+	CURSORTO(x, y);
 	for(int i = 0; i < len; i++)
 		printf("\u2500");
 }
@@ -165,6 +177,7 @@ void draw_vline(int x, int y, int len){
  * Draw horizontal line with ending characters
  */
 void draw_heline(int x, int y, int len){
+	CURSORTO(x, y);
 	printf("\u251C");
 	for(int i = 0; i < len - 2; i++) {
 		printf("\u2500");
@@ -230,6 +243,23 @@ void _mvprintw(int x, int y, char* str, int len, int w){
 		putchar(str[i]);
 }
 
+/**
+ * Utility function to convert a key to a printable string
+ * If key is maksed with CTRLMASK() then the function will return ^key otherwise key.
+ * @param char* str string to store result in
+ * @param int key key to convert
+ */
+void unmask_ctrl(char* str, int key){
+	if(key < 27) {
+		str[0] = '^';
+		str[1] = key + 0x61;
+		str[2] = '\0';
+	} else {
+		str[0] = key;
+		str[1] = '\0';
+	}
+}
+
 void resize_handler(int sig){
 	struct winsize w;
 	ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
@@ -276,6 +306,11 @@ struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int
 			for(int j = 0; j < (*(d->entries[i].c)); j++) {
 				((struct Stage*)(d->entries[i].v))[j].type = Computing;
 				((struct Stage*)(d->entries[i].v))[j].t_length = 0;
+				sprintf(((struct Stage*)(d->entries[i].v))[j].name, "stage %d", j + 1);
+				((struct Stage*)(d->entries[i].v))[j].namelen = strlen(
+					((struct Stage*)(d->entries[i].v))[j].name
+				);
+				d->entries[i].s = 0;
 			}
 			break;
 		case ProcessSegment:
@@ -315,6 +350,8 @@ void dialog_compute(struct Dialog* d){
 
 void dialog_draw(struct Dialog* d){
 
+	char format[128];
+
 	draw_border(d->x, d->y, d->w, d->h);
 
 	d->nelements = 0;
@@ -322,8 +359,6 @@ void dialog_draw(struct Dialog* d){
 		if(d->entries[i].c != 1)
 			d->nelements += *(d->entries[i].c);
 	}
-
-	draw_veline(d->x + d->ratio, d->y, d->h - 2);
 
 	int scrolled = 0; /* keep track of the current cursor position */
 	for(int i = d->scroll; scrolled < d->h - 2 && scrolled < d->nelements - 2; i++) {
@@ -360,15 +395,31 @@ void dialog_draw(struct Dialog* d){
 			scrolled++;
 			break;
 		case ProcessStage:
-			for(int j = 0; scrolled < i + *(d->entries[i].c); j++) {
-				if(d->selected == i && d->cselected == j)
-					printf("\033[0;30;41m");
+			/* TODO: better printing */
+			for(int j = 0; scrolled < i + *(d->entries[i].c) && scrolled < d->h - 2; j++) {
+				int current = d->selected == i && d->cselected == j;
 				CURSORTO(d->x + 1, d->y + 1 + scrolled);
 				scrolled++;
-				printf("[%c] %d",
-					((struct Stage*)(d->entries[i].v))[j].type == Io ? '*' : ' ',
-					((struct Stage*)(d->entries[i].v))[j].t_length
-				);
+
+				sprintf(format, "%%%d.d ", d->ratio - 1);
+				printf(format, j + 1);
+
+				/* highlight currently selected subentry */
+				if(current && d->entries[i].s == 0)
+					printf("\033[0;30;41m");
+				printf("[%c]", ((struct Stage*)(d->entries[i].v))[j].type == Io ? '*' : ' ');
+				printf("\033[0;30;0m");
+				printf(" ");
+
+				if(current && d->entries[i].s == 1)
+					printf("\033[0;30;41m");
+				printf("%d", ((struct Stage*)(d->entries[i].v))[j].t_length);
+				printf("\033[0;30;0m");
+				printf(" ");
+
+				if(current && d->entries[i].s == 2)
+					printf("\033[0;30;41m");
+				printf("%s", ((struct Stage*)(d->entries[i].v))[j].name);
 				printf("\033[0;30;0m");
 			}
 			break;
@@ -380,6 +431,7 @@ void dialog_draw(struct Dialog* d){
 		printf("\033[0;30;0m");
 	}
 
+	draw_veline(d->x + d->ratio, d->y, d->h - 2);
 }
 
 int dialog_input(struct Dialog* d){
@@ -387,29 +439,45 @@ int dialog_input(struct Dialog* d){
 	char key;
 	int scrolled = 0; /* keep track of the current cursor position */
 	switch(key = getchar()) {
-		case CTRLMASK(KEY_UP):
+		case KEY_UP:
 			next:
 			if(d->entries[d->selected].c != 1
 			&& d->cselected > 0) {
 				d->cselected--;
 			} else if(d->entries[d->selected - 1].c != 1) {
-				d->cselected = *(d->entries[d->selected - 1].c);
+				d->cselected = *(d->entries[d->selected - 1].c) - 1;
 				d->selected--;
 			} else {
 				d->selected--;
 			}
 			break;
-		case CTRLMASK(KEY_DOWN):
+		case KEY_DOWN:
 			prev:
 			if(d->entries[d->selected].c != 1
-			&& d->cselected < *(d->entries[d->selected].c)) {
+			&& d->cselected < *(d->entries[d->selected].c) - 1) {
 				d->cselected++;
 			} else {
 				d->selected++;
 				d->cselected = 0;
 			}
 			break;
-		case CTRLMASK('c'):
+		case KEY_JUMP_UP:
+			d->selected--;
+			d->cselected = 0;
+			break;
+		case KEY_JUMP_DOWN:
+			d->selected++;
+			d->cselected = 0;
+			break;
+		case KEY_LEFT:
+			if(d->entries[d->selected].s < 2)
+				d->entries[d->selected].s++;
+			break;
+		case KEY_RIGHT:
+			if(d->entries[d->selected].s > 0)
+				d->entries[d->selected].s--;
+			break;
+		case KEY_QUIT:
 			return 0;
 		case '\033':
 			getchar();
@@ -418,22 +486,50 @@ int dialog_input(struct Dialog* d){
 			case 'B': goto next;
 			}
 		case ' ':
+			if(!d->entries[d->selected].i) break; /* entry is not iteractive */
 			switch(d->entries[d->selected].t) {
+			case String:
+				goto appstr;
 			case ProcessStage:
-				((struct Stage*)(d->entries[d->selected].v))[d->cselected].type =
-				!((struct Stage*)(d->entries[d->selected].v))[d->cselected].type;
+				switch(d->entries[d->selected].s) {
+				case 0:
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].type =
+					!((struct Stage*)(d->entries[d->selected].v))[d->cselected].type;
+					break;
+				case 2:
+					processapp:
+					(((struct Stage*)(d->entries[d->selected].v))[d->cselected].name)[
+						((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen
+					] = key;
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen++;
+					(((struct Stage*)(d->entries[d->selected].v))[d->cselected].name)[
+						((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen
+					] = '\0';
+					break;
+				default:
+					break;
+				}
 				break;
 			}
 			break;
-		case '!' ... '/': /* somewhat niggerlicious, might consider rewriting the function in the future */
-		case ':' ... '~':
-			appstr:
-			if(d->entries[d->selected].length >= STRING_SIZE) break;
-			((char*)(d->entries[d->selected].v))[d->entries[d->selected].length] = key;
-			d->entries[d->selected].length++;
-			((char*)(d->entries[d->selected].v))[d->entries[d->selected].length] = '\0';
+		case '!' ... '/': /* ASCII letters */
+		case ':' ... '~': /* somewhat niggerlicious, might consider rewriting the function in the future */
+			if(!d->entries[d->selected].i) break; /* entry is not iteractive */
+			switch(d->entries[d->selected].t) {
+			case String:
+				appstr:
+				if(d->entries[d->selected].length >= STRING_MAX_SIZE) break;
+				((char*)(d->entries[d->selected].v))[d->entries[d->selected].length] = key;
+				d->entries[d->selected].length++;
+				((char*)(d->entries[d->selected].v))[d->entries[d->selected].length] = '\0';
+				break;
+			case ProcessStage:
+				if(d->entries[d->selected].s == 2) goto processapp;
+				break;
+			}
 			break;
 		case '0' ... '9':
+			if(!d->entries[d->selected].i) break; /* entry is not iteractive */
 			switch(d->entries[d->selected].t) {
 			case String:
 				goto appstr;
@@ -442,12 +538,21 @@ int dialog_input(struct Dialog* d){
 				*((int*)(d->entries[d->selected].v)) * 10 + key - 0x30;
 				break;
 			case ProcessStage:
-				((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length =
-				((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length * 10 + key - 0x30;
-				break;
+				switch(d->entries[d->selected].s) {
+				case 1:
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length =
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length * 10 + key - 0x30;
+					break;
+				case 2:
+					goto processapp;
+					break;
+				default:
+					break;
+				}
 			}
 			break;
 		case 127:
+			if(!d->entries[d->selected].i) break; /* entry is not iteractive */
 			switch(d->entries[d->selected].t) {
 			case String:
 				if(d->entries[d->selected].length <= 0) break;
@@ -457,8 +562,19 @@ int dialog_input(struct Dialog* d){
 			case Integer:
 				*((int*)(d->entries[d->selected].v)) /= 10;
 			case ProcessStage:
-				((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length /= 10;
-				break;
+				switch(d->entries[d->selected].s) {
+				case 1:
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length /= 10;
+					break;
+				case 2:
+					((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen--;
+					(((struct Stage*)(d->entries[d->selected].v))[d->cselected].name)[
+						((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen
+					] = '\0';
+					break;
+				default:
+					break;
+				}
 			}
 			break;
 		default:
@@ -497,7 +613,7 @@ int main(int argc, char** argv){
 		{ .l = "Memory",   .t = Integer,        .v = VOID_PTR(&p.memory),    .i = 0, .c = 1 },
 	};
 
-	struct Dialog* d = dialog_new(entries, SIZE(entries), 10, 10, 32, 10, 2);
+	struct Dialog* d = dialog_new(entries, SIZE(entries), 10, 10, 50, 50, 2);
 	d->selected = 0;
 	d->cselected = 0;
 
