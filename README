@@ -1,0 +1,4 @@
+Sym is a virtualization software to simulate process scheduling, memory management and in future mass-storage management.
+It is entirely written in c, with no third party libraries. Everything is in one file.
+The processes are stored in a linked list where processes are sorted by PID (which in future might become a binary tree(?)).
+This file also contains a dialog object to automatically create custom menus and matplotc, a library for plotting values.
