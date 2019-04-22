@@ -1,13 +1,24 @@
 /**
  * Sym is a virtualization software to simulate process scheduling, memory management and in future mass-storage management.
  * It is entirely written in c, with no third party libraries. Everything is in one file.
- * The processes are stored in a linked list (which in future might become a skiplist(?)).
+ * The processes are stored in a linked list where processes are sorted by PID (which in future might become a binary tree(?)).
  * This file also contains a dialog object to automatically create custom menus and matplotc, a library for plotting values.
+ *
+ * IMPORTANT:
+ *   - ps : linked list
+ *   - p  : pointer to process
+ *
  * TODO:
+ *
  *   - Instead of printing to the screen, print to a buffer, process it and then flush entire buffer to screen.
  *     This could allow me to automatically draw appropriate unicode line characers without having to do it manually.
  *     All *print* functions would become *printb* and bflush(buffer) would print buffer to screen.
  *     Lastly this would make screen repainting on resize somewhat easier.
+ *
+ *   - Write a windows class for better repainting.
+ *     struct Window {
+ *     		char buffer[term_w * term_h];
+ *     };
  */
 
 #include <stdio.h>
@@ -22,7 +33,6 @@
 /* define keys */
 #define __DVORAK__
 #if defined(__DVORAK__)
-	/* TODO: add binds for left and right movements */
 	#define KEY_DOWN      CTRLMASK('h')
 	#define KEY_UP        CTRLMASK('t')
 	#define KEY_JUMP_DOWN CTRLMASK('g')
@@ -53,15 +63,21 @@
 unsigned int term_h;
 unsigned int term_w;
 
+/* Linked List of all processes, */
+struct Process* processes;
+
 /* structs */
 struct Process {
 
+	struct Process* next;
+
 	char name[STRING_MAX_SIZE];
 	int pid;
+
 	int priority;
 
+	int parent_pid;
 	struct Process* parent;
-	struct Process* next;
 
 	struct Stage {
 		char name[STRING_MAX_SIZE];
@@ -101,7 +117,7 @@ struct Entry {
 	void* v;
 	int i;
 	enum { String, Integer, Boolean,
-	       ProcessStage, ProcessSegment } t;
+	       ProcessStage, ProcessSegment, ProcessParent} t;
 	int* c;
 	int s; /* subentry selected for ProcessStage and ProcessSegment entries */
 };
@@ -122,10 +138,12 @@ struct Dialog {
 /* prototypes */
 int dialog_input(struct Dialog* d);
 struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int w, int h, int ratio);
+struct Process* process_dialog_new();
+struct Process* process_lookup_by_pid(struct Process* p, int pid);
 void _mvprintw(int x, int y, char* str, int len, int w);
 void dialog_draw(struct Dialog* d);
 void dialog_free(struct Dialog* d);
-void dialog_init(struct Dialog* d);
+void dialog_init(struct Dialog* d, struct Process* p);
 void draw_border(int x, int y, int w, int h);
 void draw_heline(int x, int y, int len);
 void draw_hline(int x, int y, int len);
@@ -239,8 +257,10 @@ void mvprintw(int x, int y, char* str, int len, int w){
  * @param int w maximum width to print
  */
 void _mvprintw(int x, int y, char* str, int len, int w){
+	CURSORTO(x, y);
 	for(int i = 0; i < len && i < w; i++)
 		putchar(str[i]);
+	printf("%*s", w - len, "");
 }
 
 /**
@@ -302,8 +322,8 @@ struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int
 			break;
 		case ProcessStage:
 			/* TODO: implement variable size arrays, see dialog_compute() */
-			d->entries[i].v = malloc(sizeof(struct Stage) * (*(d->entries[i].c)));
-			for(int j = 0; j < (*(d->entries[i].c)); j++) {
+			d->entries[i].v = malloc(sizeof(struct Stage) * (*d->entries[i].c));
+			for(int j = 0; j < (*d->entries[i].c); j++) {
 				((struct Stage*)(d->entries[i].v))[j].type = Computing;
 				((struct Stage*)(d->entries[i].v))[j].t_length = 0;
 				sprintf(((struct Stage*)(d->entries[i].v))[j].name, "stage %d", j + 1);
@@ -322,7 +342,7 @@ struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int
 	d->y = y;
 	d->w = w;
 	d->h = h;
-	d->ratio = x / ratio;
+	d->ratio = ratio;
 	d->cselected = 0;
 	d->nelements= 0;
 	d->scroll = 0;
@@ -334,7 +354,6 @@ void dialog_free(struct Dialog* d){
 	for(int i = 0; i < d->nentries; i++)
 		if(d->entries[i].c != 1)
 			free(d->entries[i].v);
-	free(d->entries);
 	free(d);
 }
 
@@ -345,7 +364,24 @@ void dialog_free(struct Dialog* d){
  *   - Implement variable size arrays
  *   - Add total memory and length calculations (quite clumsy)
  */
-void dialog_compute(struct Dialog* d){
+void dialog_compute_process(struct Dialog* d, struct Process* p){
+	struct Process* tmp;
+	for(int i = 0; i < d->nentries; i++) {
+		switch(d->entries[i].t) {
+		case ProcessStage:
+			p->t_length = 0;
+			for(int j = 0; j < *d->entries[i].c; j++) {
+				p->t_length += ((struct Stage*)(d->entries[i].v))[j].t_length;
+			}
+			break;
+		case ProcessSegment:
+			break;
+		case ProcessParent:
+			if(tmp = process_lookup_by_pid(processes, p) != NULL)
+				p->parent = tmp;
+			break;
+		}
+	}
 }
 
 void dialog_draw(struct Dialog* d){
@@ -357,11 +393,12 @@ void dialog_draw(struct Dialog* d){
 	d->nelements = 0;
 	for(int i = 0; i < d->nentries; i++) {
 		if(d->entries[i].c != 1)
-			d->nelements += *(d->entries[i].c);
+			d->nelements += *d->entries[i].c;
 	}
 
 	int scrolled = 0; /* keep track of the current cursor position */
-	for(int i = d->scroll; scrolled < d->h - 2 && scrolled < d->nelements - 2; i++) {
+	//for(int i = d->scroll; scrolled < d->h - 2 && i < d->nentries - 2; i++) { /* TODO: fix this line */
+	for(int i = 0; i < d->nentries; i++) {
 		CURSORTO(d->x + 1, d->y + 1 + scrolled);
 		switch(d->entries[i].t) {
 		case String:
@@ -379,6 +416,7 @@ void dialog_draw(struct Dialog* d){
 				 d->w - d->ratio - 3);
 			scrolled++;
 			break;
+		case ProcessParent: /* 200 IQ play here. TODO: also remember to add printing of the parent's name */
 		case Integer:
 			if(d->selected == i)
 				printf("\033[0;30;41m");
@@ -396,7 +434,7 @@ void dialog_draw(struct Dialog* d){
 			break;
 		case ProcessStage:
 			/* TODO: better printing */
-			for(int j = 0; scrolled < i + *(d->entries[i].c) && scrolled < d->h - 2; j++) {
+			for(int j = 0; scrolled < i + *d->entries[i].c && scrolled < d->h - 2; j++) {
 				int current = d->selected == i && d->cselected == j;
 				CURSORTO(d->x + 1, d->y + 1 + scrolled);
 				scrolled++;
@@ -424,7 +462,7 @@ void dialog_draw(struct Dialog* d){
 			}
 			break;
 		default:
-			printf("type not yet supported");
+			printf("entry type not yet supported");
 			scrolled++;
 			break;
 		}
@@ -498,6 +536,7 @@ int dialog_input(struct Dialog* d){
 					break;
 				case 2:
 					processapp:
+					if(((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen >= STRING_MAX_SIZE) break;
 					(((struct Stage*)(d->entries[d->selected].v))[d->cselected].name)[
 						((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen
 					] = key;
@@ -525,7 +564,6 @@ int dialog_input(struct Dialog* d){
 				break;
 			case ProcessStage:
 				if(d->entries[d->selected].s == 2) goto processapp;
-				break;
 			}
 			break;
 		case '0' ... '9':
@@ -533,6 +571,7 @@ int dialog_input(struct Dialog* d){
 			switch(d->entries[d->selected].t) {
 			case String:
 				goto appstr;
+			case ProcessParent:
 			case Integer:
 				*((int*)(d->entries[d->selected].v)) =
 				*((int*)(d->entries[d->selected].v)) * 10 + key - 0x30;
@@ -559,6 +598,7 @@ int dialog_input(struct Dialog* d){
 				((char*)(d->entries[d->selected].v))[d->entries[d->selected].length] = '\0';
 				d->entries[d->selected].length--;
 				break;
+			case ProcessParent:
 			case Integer:
 				*((int*)(d->entries[d->selected].v)) /= 10;
 			case ProcessStage:
@@ -567,6 +607,7 @@ int dialog_input(struct Dialog* d){
 					((struct Stage*)(d->entries[d->selected].v))[d->cselected].t_length /= 10;
 					break;
 				case 2:
+					if(((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen <= 0) break;
 					((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen--;
 					(((struct Stage*)(d->entries[d->selected].v))[d->cselected].name)[
 						((struct Stage*)(d->entries[d->selected].v))[d->cselected].namelen
@@ -583,42 +624,86 @@ int dialog_input(struct Dialog* d){
 	return 1;
 }
 
-void dialog_init(struct Dialog* d){
+void dialog_init(struct Dialog* d, struct Process* p){
+	int running = 1;
 	do {
 		dialog_draw(d);
-	} while(dialog_input(d));
+		running = dialog_input(d);
+		dialog_compute_process(d, p);
+	} while(running);
+}
+
+/* TODO: lookup time is O(n), changing to a binary tree could decrease it to O(log n) */
+struct Process* process_lookup_by_pid(struct Process* ps, int pid){
+	for(struct Process* p = ps; p != NULL; p = p->next)
+		if(p->pid == pid)
+			return p;
+	return NULL;
+}
+
+int process_insert(struct Process* ps, struct Process* p){
+	for(struct Process* p = ps; p != NULL; p = p->next) {
+		if(p->next == NULL) {
+			p->next = malloc(sizeof(struct Process*));
+			p->next = p;
+			return 1;
+		} else if(p->next->pid == p->pid) {
+			return 0;
+		} else if(p->next->pid < p->pid) {
+			struct Process* new = malloc(sizeof(struct Process*));
+			new->next = p->next;
+			p->next = new;
+			return 1;
+		}
+	}
+}
+
+struct Process* process_dialog_new(){
+	static int pid = 1; /* easiest way to keep track of the pids */
+
+	struct Process* p = malloc(sizeof(struct Process*));
+	char name[10];
+	sprintf(name, "process %d", pid);
+	strcpy(p->name, name);
+	p->pid = pid;
+	p->nstages = 3;
+	p->nsegments = 0;
+	p->memory = 0;
+	p->t_length = 0;
+	p->priority = 0;
+	p->t_arrival = 0;
+	p->parent_pid = 0;
+	p->parent = malloc(sizeof(struct Process*));
+
+	struct Entry entries[] = {
+		{ .l = "Name",           .t = String,         .v = VOID_PTR( p->name),         .i = 1, .c = 1 },
+		{ .l = "Priority",       .t = Integer,        .v = VOID_PTR(&p->priority),     .i = 1, .c = 1 },
+		{ .l = "Arrival",        .t = Integer,        .v = VOID_PTR(&p->t_arrival),    .i = 1, .c = 1 },
+		{ .l = "Stages",         .t = Integer,        .v = VOID_PTR(&p->nstages),      .i = 1, .c = 1 },
+		{ .l = "",               .t = ProcessStage,   .v = VOID_PTR( p->stages),       .i = 1, .c = &p->nstages },
+		{ .l = "Length",         .t = Integer,        .v = VOID_PTR(&p->t_length),     .i = 0, .c = 1 },
+		{ .l = "Segments",       .t = Integer,        .v = VOID_PTR(&p->nsegments),    .i = 1, .c = 1 },
+		{ .l = "",               .t = ProcessSegment, .v = VOID_PTR( p->segments),     .i = 1, .c = &p->nsegments },
+		{ .l = "Memory",         .t = Integer,        .v = VOID_PTR(&p->memory),       .i = 0, .c = 1 },
+		{ .l = "Parent's PID",   .t = ProcessParent,  .v = VOID_PTR(&p->parent_pid),   .i = 1, .c = 1 },
+	};
+
+	struct Dialog* d = dialog_new(entries, SIZE(entries), 5, 5, term_w - 10, term_h - 10, 10);
+	dialog_init(d, p);
+	dialog_free(d);
+
+	pid++;
+	return p;
 }
 
 int main(int argc, char** argv){
 
-	struct Process p;
-
-	strcpy(p.name, "a really long name");
-	p.nstages = 10;
-	p.nsegments = 10;
-	p.memory = 0;
-	p.t_length = 0;
-	p.priority = 0;
-	p.t_arrival = 0;
-
-	struct Entry entries[] = {
-		{ .l = "Name",     .t = String,         .v = VOID_PTR( p.name),      .i = 1, .c = 1 },
-		{ .l = "Priority", .t = Integer,        .v = VOID_PTR(&p.priority),  .i = 1, .c = 1 },
-		{ .l = "Arrival",  .t = Integer,        .v = VOID_PTR(&p.t_arrival), .i = 1, .c = 1 },
-		{ .l = "Stages",   .t = Integer,        .v = VOID_PTR(&p.nstages),   .i = 1, .c = 1 },
-		{ .l = "",         .t = ProcessStage,   .v = VOID_PTR( p.stages),    .i = 1, .c = &p.nstages },
-		{ .l = "Length",   .t = Integer,        .v = VOID_PTR(&p.t_length),  .i = 0, .c = 1 },
-		{ .l = "Segments", .t = Integer,        .v = VOID_PTR(&p.nsegments), .i = 1, .c = 1 },
-		{ .l = "",         .t = ProcessSegment, .v = VOID_PTR( p.segments),  .i = 1, .c = &p.nsegments },
-		{ .l = "Memory",   .t = Integer,        .v = VOID_PTR(&p.memory),    .i = 0, .c = 1 },
-	};
-
-	struct Dialog* d = dialog_new(entries, SIZE(entries), 10, 10, 50, 50, 2);
-	d->selected = 0;
-	d->cselected = 0;
+	processes = malloc(sizeof(struct Process*));
 
 	initwin();
-	dialog_init(d);
+
+	printf("%d", process_insert(processes, process_dialog_new()));
+
 	endwin();
 
 }
