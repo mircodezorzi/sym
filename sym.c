@@ -19,6 +19,10 @@
  *     struct Window {
  *     		char buffer[term_w * term_h];
  *     };
+ *
+ *   - Work on the memory management aspect
+ *   - Fix resize handler (currently doesn't redraw)
+ *
  */
 
 #include <stdio.h>
@@ -31,6 +35,7 @@
 #include <sys/ioctl.h>
 
 /* define keys */
+/* TODO: restructure this for easier configuration, see suckless tools */
 #define __DVORAK__
 #if defined(__DVORAK__)
 	#define KEY_DOWN      CTRLMASK('h')
@@ -69,16 +74,23 @@ struct Process* processes;
 /* structs */
 struct Process {
 
+	/* linked list topology */
 	struct Process* next;
+	struct Process* parent;
+	int parent_pid;
 
+	/* metadata */
 	char name[STRING_MAX_SIZE];
+	int priority;
 	int pid;
 
-	int priority;
+	/* times */
+	int t_arrival;
+	int t_length;
+	int t_turnaround;
+	int t_ellapsed;
 
-	int parent_pid;
-	struct Process* parent;
-
+	/* structure of the process */
 	struct Stage {
 		char name[STRING_MAX_SIZE];
 		int namelen;
@@ -104,11 +116,6 @@ struct Process {
 	       Blocked,  Zombie,
 	       Terminated } status;
 
-	int t_arrival;
-	int t_length;
-	int t_turnaround;
-	int t_ellapsed;
-
 };
 
 struct Entry {
@@ -117,7 +124,7 @@ struct Entry {
 	void* v;
 	int i;
 	enum { String, Integer, Boolean,
-	       ProcessStage, ProcessSegment, ProcessParent} t;
+	       ProcessStage, ProcessSegment, ProcessParent } t;
 	int* c;
 	int s; /* subentry selected for ProcessStage and ProcessSegment entries */
 };
@@ -137,13 +144,15 @@ struct Dialog {
 
 /* prototypes */
 int dialog_input(struct Dialog* d);
+int process_insert(struct Process* ps, struct Process* p);
 struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int w, int h, int ratio);
 struct Process* process_dialog_new();
+struct Process* process_list_length(struct Process* ps);
 struct Process* process_lookup_by_pid(struct Process* p, int pid);
-void _mvprintw(int x, int y, char* str, int len, int w);
+void dialog_compute_process(struct Dialog* d, struct Process* p);
 void dialog_draw(struct Dialog* d);
 void dialog_free(struct Dialog* d);
-void dialog_init(struct Dialog* d, struct Process* p);
+void die(int line, char* format, ...);
 void draw_border(int x, int y, int w, int h);
 void draw_heline(int x, int y, int len);
 void draw_hline(int x, int y, int len);
@@ -155,67 +164,9 @@ void endwin();
 void initwin();
 void mvprintf(int x, int y, char* format, ...);
 void mvprintw(int x, int y, char* str, int len, int w);
+void mvprintc(int x, int y, char* str, int len, int w);
 void resize_handler(int sig);
 void unmask_ctrl(char* str, int key);
-
-/* functions */
-void draw_border(int x, int y, int w, int h){
-	CURSORTO(x, y);
-	printf("\u250C");
-	for(int i = 0; i < w - 2; i++)
-		printf("\u2500");
-	printf("\u2510");
-
-	for(int i = 1; i < h - 1; i++) {
-		CURSORTO(x, y + i);
-		printf("\u2502%*s\u2502", w - 2, "");
-	}
-
-	CURSORTO(x, y + h - 1);
-	printf("\u2514");
-	for(int i = 0; i < w - 2; i++)
-		printf("\u2500");
-	printf("\u2518");
-}
-
-void draw_hline(int x, int y, int len){
-	CURSORTO(x, y);
-	for(int i = 0; i < len; i++)
-		printf("\u2500");
-}
-
-void draw_vline(int x, int y, int len){
-	for(int i = 0; i < len; i++) {
-		CURSORTO(x, y + i + 1);
-		printf("\u2502");
-	}
-}
-
-/**
- * Draw horizontal line with ending characters
- */
-void draw_heline(int x, int y, int len){
-	CURSORTO(x, y);
-	printf("\u251C");
-	for(int i = 0; i < len - 2; i++) {
-		printf("\u2500");
-	}
-	printf("\u2524");
-}
-
-/**
- * Draw vertical line with ending characters
- */
-void draw_veline(int x, int y, int len){
-	CURSORTO(x, y + 0);
-	printf("\u252C");
-	for(int i = 0; i < len; i++) {
-		CURSORTO(x, y + i + 1);
-		printf("\u2502");
-	}
-	CURSORTO(x, y + len + 1);
-	printf("\u2534");
-}
 
 /**
  * Move cursor to (x, y) and print with format.
@@ -256,7 +207,7 @@ void mvprintw(int x, int y, char* str, int len, int w){
  * @param int len length of string str
  * @param int w maximum width to print
  */
-void _mvprintw(int x, int y, char* str, int len, int w){
+void mvprintc(int x, int y, char* str, int len, int w){
 	CURSORTO(x, y);
 	for(int i = 0; i < len && i < w; i++)
 		putchar(str[i]);
@@ -310,9 +261,71 @@ void endwin(){
 	printf("\033[?25h");
 }
 
+void die(int line, char* format, ...){
+	va_list vargs;
+	va_start(vargs, format);
+	fprintf(stderr, "%d: ", line);
+	vfprintf(stderr, format, vargs);
+	va_end (vargs);
+	exit(1);
+}
+
+/* functions */
+void draw_border(int x, int y, int w, int h){
+	CURSORTO(x, y);
+	printf("\u250C");
+	for(int i = 0; i < w - 2; i++)
+		printf("\u2500");
+	printf("\u2510");
+
+	for(int i = 1; i < h - 1; i++) {
+		CURSORTO(x, y + i);
+		printf("\u2502%*s\u2502", w - 2, "");
+	}
+
+	CURSORTO(x, y + h - 1);
+	printf("\u2514");
+	for(int i = 0; i < w - 2; i++)
+		printf("\u2500");
+	printf("\u2518");
+}
+
+void draw_hline(int x, int y, int len){
+	CURSORTO(x, y);
+	for(int i = 0; i < len; i++)
+		printf("\u2500");
+}
+
+void draw_vline(int x, int y, int len){
+	for(int i = 0; i < len; i++) {
+		CURSORTO(x, y + i + 1);
+		printf("\u2502");
+	}
+}
+
+void draw_heline(int x, int y, int len){
+	CURSORTO(x, y);
+	printf("\u251C");
+	for(int i = 0; i < len - 2; i++) {
+		printf("\u2500");
+	}
+	printf("\u2524");
+}
+
+void draw_veline(int x, int y, int len){
+	CURSORTO(x, y + 0);
+	printf("\u252C");
+	for(int i = 0; i < len; i++) {
+		CURSORTO(x, y + i + 1);
+		printf("\u2502");
+	}
+	CURSORTO(x, y + len + 1);
+	printf("\u2534");
+}
+
 struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int w, int h, int ratio){
 	struct Dialog* d = malloc(sizeof(struct Dialog));
-	d->entries = malloc(sizeof(struct Entry) * nentries);
+	d->entries = malloc(sizeof(struct Entry*) * nentries);
 	d->entries = entries;
 	d->nentries = nentries;
 	for(int i = 0; i < nentries; i++) {
@@ -322,7 +335,7 @@ struct Dialog* dialog_new(struct Entry* entries, int nentries, int x, int y, int
 			break;
 		case ProcessStage:
 			/* TODO: implement variable size arrays, see dialog_compute() */
-			d->entries[i].v = malloc(sizeof(struct Stage) * (*d->entries[i].c));
+			d->entries[i].v = malloc(sizeof(struct Stage*) * (*d->entries[i].c));
 			for(int j = 0; j < (*d->entries[i].c); j++) {
 				((struct Stage*)(d->entries[i].v))[j].type = Computing;
 				((struct Stage*)(d->entries[i].v))[j].t_length = 0;
@@ -357,33 +370,6 @@ void dialog_free(struct Dialog* d){
 	free(d);
 }
 
-/**
- * Function to validate ProcessStage and ProcessSegment entries, not needed for simpler dialog objects.
- * This could also be implemented as a lambda in future versions.
- * TODO:
- *   - Implement variable size arrays
- *   - Add total memory and length calculations (quite clumsy)
- */
-void dialog_compute_process(struct Dialog* d, struct Process* p){
-	struct Process* tmp;
-	for(int i = 0; i < d->nentries; i++) {
-		switch(d->entries[i].t) {
-		case ProcessStage:
-			p->t_length = 0;
-			for(int j = 0; j < *d->entries[i].c; j++) {
-				p->t_length += ((struct Stage*)(d->entries[i].v))[j].t_length;
-			}
-			break;
-		case ProcessSegment:
-			break;
-		case ProcessParent:
-			if(tmp = process_lookup_by_pid(processes, p) != NULL)
-				p->parent = tmp;
-			break;
-		}
-	}
-}
-
 void dialog_draw(struct Dialog* d){
 
 	char format[128];
@@ -404,7 +390,7 @@ void dialog_draw(struct Dialog* d){
 		case String:
 			if(d->selected == i)
 				printf("\033[0;30;41m");
-			_mvprintw(d->x + 1,
+			mvprintc(d->x + 1,
 				  d->y + 1 + scrolled,
 				  d->entries[i].l,
 				  strlen(d->entries[i].l),
@@ -420,7 +406,7 @@ void dialog_draw(struct Dialog* d){
 		case Integer:
 			if(d->selected == i)
 				printf("\033[0;30;41m");
-			_mvprintw(d->x + 1,
+			mvprintc(d->x + 1,
 				  d->y + 1 + scrolled,
 				  d->entries[i].l,
 				  strlen(d->entries[i].l),
@@ -621,16 +607,17 @@ int dialog_input(struct Dialog* d){
 		default:
 			break;
 	}
+	char c[3];
+	unmask_ctrl(c, key);
+	mvprintf(0, 0, "%s", c);
 	return 1;
 }
 
-void dialog_init(struct Dialog* d, struct Process* p){
-	int running = 1;
-	do {
-		dialog_draw(d);
-		running = dialog_input(d);
-		dialog_compute_process(d, p);
-	} while(running);
+
+struct Process* process_list_length(struct Process* ps){
+	int len = 0;
+	for(struct Process* p = ps; p != NULL; p = p->next) len++;
+	return len;
 }
 
 /* TODO: lookup time is O(n), changing to a binary tree could decrease it to O(log n) */
@@ -641,16 +628,30 @@ struct Process* process_lookup_by_pid(struct Process* ps, int pid){
 	return NULL;
 }
 
+/**
+ * Check's the validity of the process list
+ * Return codes:
+ * 0 no errors
+ * 1 process's parent is spawned after the process itself
+ */
+int process_check_validity(struct Process* ps){
+	for(struct Process* p = ps; p != NULL; p = p->next) {
+		if(p->parent != NULL && p->parent->t_arrival <= p->t_arrival)
+			return 1;
+	}
+	return 0;
+}
+
 int process_insert(struct Process* ps, struct Process* p){
 	for(struct Process* p = ps; p != NULL; p = p->next) {
 		if(p->next == NULL) {
-			p->next = malloc(sizeof(struct Process*));
+			p->next = malloc(sizeof(struct Process));
 			p->next = p;
 			return 1;
 		} else if(p->next->pid == p->pid) {
 			return 0;
 		} else if(p->next->pid < p->pid) {
-			struct Process* new = malloc(sizeof(struct Process*));
+			struct Process* new = malloc(sizeof(struct Process));
 			new->next = p->next;
 			p->next = new;
 			return 1;
@@ -658,13 +659,37 @@ int process_insert(struct Process* ps, struct Process* p){
 	}
 }
 
-struct Process* process_dialog_new(){
-	static int pid = 1; /* easiest way to keep track of the pids */
+/**
+ * Auxiliary function for the dialog object.
+ * Function to validate ProcessStage and ProcessSegment entries.
+ * TODO:
+ *   - Implement variable size arrays
+ */
+void dialog_compute_process(struct Dialog* d, struct Process* p){
+	struct Process* tmp;
+	for(int i = 0; i < d->nentries; i++) {
+		switch(d->entries[i].t) {
+		case ProcessStage:
+			p->t_length = 0;
+			for(int j = 0; j < *d->entries[i].c; j++) {
+				p->t_length += ((struct Stage*)(d->entries[i].v))[j].t_length;
+			}
+			break;
+		case ProcessSegment:
+			break;
+		case ProcessParent: /* TODO: refine this part */
+			if(tmp = process_lookup_by_pid(processes, p) != NULL)
+				p->parent = tmp;
+			break;
+		}
+	}
+}
 
-	struct Process* p = malloc(sizeof(struct Process*));
-	char name[10];
-	sprintf(name, "process %d", pid);
-	strcpy(p->name, name);
+struct Process* process_dialog_new(){
+	static int pid = 1; /* easiest way to keep track of the pids, will change in future */
+
+	struct Process* p = malloc(sizeof(struct Process));
+	strcpy(p->name, "Hello, World!");
 	p->pid = pid;
 	p->nstages = 3;
 	p->nsegments = 0;
@@ -673,10 +698,12 @@ struct Process* process_dialog_new(){
 	p->priority = 0;
 	p->t_arrival = 0;
 	p->parent_pid = 0;
-	p->parent = malloc(sizeof(struct Process*));
+	p->parent = malloc(sizeof(struct Process));
+	pid++;
 
 	struct Entry entries[] = {
 		{ .l = "Name",           .t = String,         .v = VOID_PTR( p->name),         .i = 1, .c = 1 },
+		{ .l = "PID",            .t = Integer,        .v = VOID_PTR(&p->pid),          .i = 1, .c = 1 },
 		{ .l = "Priority",       .t = Integer,        .v = VOID_PTR(&p->priority),     .i = 1, .c = 1 },
 		{ .l = "Arrival",        .t = Integer,        .v = VOID_PTR(&p->t_arrival),    .i = 1, .c = 1 },
 		{ .l = "Stages",         .t = Integer,        .v = VOID_PTR(&p->nstages),      .i = 1, .c = 1 },
@@ -689,16 +716,26 @@ struct Process* process_dialog_new(){
 	};
 
 	struct Dialog* d = dialog_new(entries, SIZE(entries), 5, 5, term_w - 10, term_h - 10, 10);
-	dialog_init(d, p);
-	dialog_free(d);
 
-	pid++;
+	int running = 1;
+	do {
+		dialog_draw(d);
+		running = dialog_input(d);
+		dialog_compute_process(d, processes);
+	} while(running);
+
+	if (p->parent = process_lookup_by_pid(processes, p->parent_pid) == NULL)
+		free(p->parent);
+
+	dialog_free(d);
 	return p;
 }
 
 int main(int argc, char** argv){
 
-	processes = malloc(sizeof(struct Process*));
+	processes = malloc(sizeof(struct Process));
+	if(processes == NULL)
+		die(__LINE__, "malloc failed");
 
 	initwin();
 
