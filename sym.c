@@ -126,7 +126,7 @@ struct Entry {
 	enum { String, Integer, Boolean,
 	       ProcessStage, ProcessSegment, ProcessParent } t;
 	int* c;
-	int s; /* subentry selected for ProcessStage and ProcessSegment entries */
+	int s; /* subentry selected for ProcessStage and ProcessSegment entries, also used for cursor in string */
 };
 
 struct Dialog {
@@ -167,6 +167,7 @@ void mvprintw(int x, int y, char* str, int len, int w);
 void mvprintc(int x, int y, char* str, int len, int w);
 void resize_handler(int sig);
 void unmask_ctrl(char* str, int key);
+void repaint();
 
 /**
  * Move cursor to (x, y) and print with format.
@@ -193,10 +194,9 @@ void mvprintw(int x, int y, char* str, int len, int w){
 		for(int i = len - w + 2; i < len; i++)
 		putchar(str[i]);
 	} else {
-		for(int i = -1; i < w - len; i++)
-			putchar(' ');
 		for(int i = 0; i < len; i++)
 			putchar(str[i]);
+		printf("%*s", w - len + 1, "");
 	}
 }
 
@@ -237,6 +237,7 @@ void resize_handler(int sig){
 	term_h = w.ws_row;
 	term_w = w.ws_col;
 	signal(SIGWINCH, resize_handler);
+	repaint();
 }
 
 /**
@@ -268,6 +269,10 @@ void die(int line, char* format, ...){
 	vfprintf(stderr, format, vargs);
 	va_end (vargs);
 	exit(1);
+}
+
+void repaint(){
+	system("clear");
 }
 
 /* functions */
@@ -372,6 +377,9 @@ void dialog_free(struct Dialog* d){
 
 void dialog_draw(struct Dialog* d){
 
+	d->w = term_w - 10;
+	d->h = term_h - 10;
+
 	char format[128];
 
 	draw_border(d->x, d->y, d->w, d->h);
@@ -383,8 +391,7 @@ void dialog_draw(struct Dialog* d){
 	}
 
 	int scrolled = 0; /* keep track of the current cursor position */
-	//for(int i = d->scroll; scrolled < d->h - 2 && i < d->nentries - 2; i++) { /* TODO: fix this line */
-	for(int i = 0; i < d->nentries; i++) {
+	for(int i = 0; i < d->nentries && scrolled < d->h - 2; i++) {
 		CURSORTO(d->x + 1, d->y + 1 + scrolled);
 		switch(d->entries[i].t) {
 		case String:
@@ -506,9 +513,19 @@ int dialog_input(struct Dialog* d){
 		case '\033':
 			getchar();
 			switch(key = getchar()) {
-			case 'A': goto prev;
-			case 'B': goto next;
+			case 'A': goto next;
+			case 'B': goto prev;
+			/* TODO: implement possibility to move cursor in string entries */
+			case 'C':
+				if(d->entries[d->selected].t == String)
+					d->entries[d->selected].s++;
+				break;
+			case 'D':
+				if(d->entries[d->selected].t == String)
+					d->entries[d->selected].s--;
+				break;
 			}
+			break;
 		case ' ':
 			if(!d->entries[d->selected].i) break; /* entry is not iteractive */
 			switch(d->entries[d->selected].t) {
@@ -733,11 +750,12 @@ struct Process* process_dialog_new(){
 
 int main(int argc, char** argv){
 
+	initwin();
+
 	processes = malloc(sizeof(struct Process));
 	if(processes == NULL)
 		die(__LINE__, "malloc failed");
 
-	initwin();
 
 	printf("%d", process_insert(processes, process_dialog_new()));
 
