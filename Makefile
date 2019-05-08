@@ -24,5 +24,4 @@ run: $(EXEC)
 .PHONY: clean
 
 clean:
-	rm -f $(EXEC) $(OBJS)
-
+	rm -f $(EXEC) $(OBJS) *.tu

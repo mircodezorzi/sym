@@ -45,6 +45,7 @@
 	#define KEY_RIGHT     CTRLMASK('d')
 	#define KEY_LEFT      CTRLMASK('n')
 	#define KEY_QUIT      CTRLMASK('f')
+	#define KEY_PROCESS_NEW 'a'
 #else
 	#define KEY_DOWN      CTRLMASK('j')
 	#define KEY_UP        CTRLMASK('k')
@@ -53,6 +54,7 @@
 	#define KEY_RIGHT     CTRLMASK('h')
 	#define KEY_LEFT      CTRLMASK('l')
 	#define KEY_QUIT      CTRLMASK('c')
+	#define KEY_PROCESS_NEW 'a'
 #endif /* __DVORAK__ */
 
 /* configs */
@@ -63,6 +65,7 @@
 #define CURSORTO(x, y) printf("\033[%d;%dH", (y) + 1, (x) + 1)
 #define SIZE(vec) (sizeof(vec)/sizeof((vec)[0]))
 #define VOID_PTR(x) ((void*)(x))
+#define KEYDEF(k, f) printf("%s\033[0;30;41m%s\033[0;30;0m", k, f);
 
 /* global variables */
 unsigned int term_h;
@@ -465,6 +468,25 @@ void dialog_draw(struct Dialog* d){
 	draw_veline(d->x + d->ratio, d->y, d->h - 2);
 }
 
+void dialog_status(){
+	CURSORTO(0, term_w);
+	char k[3];
+	unmask_ctrl(k, KEY_QUIT);
+	KEYDEF(k, "quit");
+	unmask_ctrl(k, KEY_LEFT);
+	KEYDEF(k, "left");
+	unmask_ctrl(k, KEY_DOWN);
+	KEYDEF(k, "down");
+	unmask_ctrl(k, KEY_JUMP_DOWN);
+	KEYDEF(k, "jump down");
+	unmask_ctrl(k, KEY_UP);
+	KEYDEF(k, "up");
+	unmask_ctrl(k, KEY_JUMP_UP);
+	KEYDEF(k, "jump up");
+	unmask_ctrl(k, KEY_RIGHT);
+	KEYDEF(k, "right");
+}
+
 int dialog_input(struct Dialog* d){
 
 	char key;
@@ -737,6 +759,7 @@ struct Process* process_dialog_new(){
 	int running = 1;
 	do {
 		dialog_draw(d);
+		dialog_status();
 		running = dialog_input(d);
 		dialog_compute_process(d, processes);
 	} while(running);
@@ -756,9 +779,16 @@ int main(int argc, char** argv){
 	if(processes == NULL)
 		die(__LINE__, "malloc failed");
 
-
-	printf("%d", process_insert(processes, process_dialog_new()));
-
-	endwin();
+	char key;
+	while(1) {
+		switch(key = getchar()) {
+		case KEY_PROCESS_NEW:
+			printf("%d", process_insert(processes, process_dialog_new()));
+			break;
+		case KEY_QUIT:
+			endwin();
+			return 0;
+		}
+	}
 
 }
